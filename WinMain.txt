@@ -1,0 +1,515 @@
+// WinMain.cpp : Defines the entry point for the application.
+//
+
+#include "stdafx.h"
+#include "WinMain.h"
+#include <windows.h>
+#include <stdio.h>
+#include <shellapi.h>
+
+#define SERVICE_NAME  _T("HelloWorld") 
+
+
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
+VOID WINAPI ServiceCtrlHandler(DWORD);
+DWORD WINAPI ServiceWorkerThread(LPVOID lpParam);
+DWORD WINAPI CreateBat(LPVOID lpParam);
+DWORD WINAPI RunBat(LPVOID lpParam);
+DWORD WINAPI StartMyService(LPVOID lpParam);
+DWORD WINAPI DeleteBat(LPVOID lpParam);
+DWORD createBatThreadID, batThreadID, startServiceThreadID, deleteBatThreadID;
+HANDLE createBatThread, batThread, startServiceThread, deleteBatThread;
+
+TCHAR  exeName[4096] = TEXT("");
+TCHAR myCommand1[1024] = L"cmd.exe /c sc create HelloWorld binpath= \"";
+char myCommand[100];
+
+SERVICE_STATUS        g_ServiceStatus = { 0 };
+SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
+HANDLE                g_ServiceStopEvent = INVALID_HANDLE_VALUE;
+SC_HANDLE schSCManager, schService;
+
+void registry_write(LPCTSTR subkey, LPCTSTR name, DWORD type, const wchar_t* value);
+int registry_read(LPCTSTR subkey, LPCTSTR name, DWORD type);
+int installService = 0;
+int installRunKey = 0;
+
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
+                     _In_opt_ HINSTANCE hPrevInstance,
+                     _In_ LPWSTR    lpCmdLine,
+                     _In_ int       nCmdShow)
+{
+
+	SERVICE_TABLE_ENTRY ServiceTable[] =
+	{
+		{LPWSTR(SERVICE_NAME), (LPSERVICE_MAIN_FUNCTION)ServiceMain},
+		{NULL, NULL}
+	};
+
+	if (StartServiceCtrlDispatcher(ServiceTable) == FALSE)
+	{
+		//return GetLastError();
+	}
+	schSCManager = OpenSCManager(
+		NULL,                    // local computer
+		NULL,                    // servicesActive database 
+		SC_MANAGER_ALL_ACCESS);  // full access rights 
+
+	schService = OpenService(
+		schSCManager,         // SCM database 
+		L"HelloWorld",            // name of service 
+		SERVICE_ALL_ACCESS);  // full access 
+
+	//getting command line arguments
+	LPWSTR *szArgList;
+	int argCount;
+	szArgList = CommandLineToArgvW(GetCommandLine(), &argCount);
+	DWORD  retval = 0;
+	TCHAR** lppPart = { NULL };
+
+	//get full path name of exe to be written in the registry, stored in variable exeName
+	retval = GetFullPathName(szArgList[0],
+		4096,
+		exeName,
+		lppPart);
+	
+	//only 1 argument, return error
+	if (argCount == 1) {
+		MessageBox(NULL, L"Specify argument 1 or 2", L"Error", MB_OK);
+		return 0;
+	}
+
+	//if argument 2 -> write to registry and output Hello World 2
+	if (wcscmp(L"2", szArgList[1]) == 0) {
+
+		//checking if its in registry
+		int result = registry_read(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"Hello World", REG_SZ);
+		
+		//if key is not found (result == 0) -> install it
+		if (result == 0) { 
+			//adding " " around exe, and appending argument 2 behind
+			TCHAR escapeChar[1024] = L"\"";
+			size_t   i;
+			TCHAR  myCommand[4096] = TEXT("");
+			wcscat_s(myCommand, escapeChar);
+			wcscat_s(myCommand, exeName);
+			wcscat_s(myCommand, escapeChar);
+			wcscat_s(myCommand, L" 2");
+
+			//writing to registry
+			registry_write(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"Hello World", REG_SZ, myCommand);
+			MessageBox(NULL, L"Installing as a HKLM Run Key", L"2 found", MB_OK);
+		}
+		
+		//else just do this
+		while (1) {
+			OutputDebugStringW(L"Hello World 2");
+			Sleep(2000);
+		}
+
+	}
+
+	//else if argument is 1, check if already installed in service
+	else if (schService != NULL) {
+		MessageBox(NULL, L"Service already installed", L"Error", MB_OK);		
+	}
+
+
+	//service not installed and argument specified 1 -> run program
+	else if (wcscmp(L"1", szArgList[1]) == 0) {
+		
+		TCHAR escapeChar[1024] = L"\"";
+		size_t   i;
+		wcscat_s(myCommand1, exeName);
+		wcscat_s(myCommand1, escapeChar);
+		wcscat_s(myCommand1, L" start= auto");
+		#pragma warning(disable : 4996)
+		wcstombs(myCommand, myCommand1, wcslen(myCommand1) + 1);
+
+		MessageBox(NULL, L"Installing as a service", L"Argument 1 found", MB_OK);
+
+		//write my command (sc create HelloWorld binPath="exename" start=auto) to test.bat
+		createBatThread = CreateThread(
+			NULL,         // default security attributes
+			0,            // default stack size
+			(LPTHREAD_START_ROUTINE)CreateBat,
+			NULL,         // no thread function arguments
+			0,            // default creation flags
+			&createBatThreadID); // receive thread identifier
+
+		WaitForSingleObject(createBatThread, INFINITE);
+
+		//run the bat file
+		batThread = CreateThread(
+			NULL,         // default security attributes
+			0,            // default stack size
+			(LPTHREAD_START_ROUTINE)RunBat,
+			NULL,         // no thread function arguments
+			0,            // default creation flags
+			&batThreadID); // receive thread identifier
+
+		WaitForSingleObject(batThread, INFINITE);
+
+		//start service
+		startServiceThread = CreateThread(
+			NULL,         // default security attributes
+			0,            // default stack size
+			(LPTHREAD_START_ROUTINE)StartMyService,
+			NULL,         // no thread function arguments
+			0,            // default creation flags
+			&startServiceThreadID); // receive thread identifier
+
+		WaitForSingleObject(startServiceThread, INFINITE);
+
+		//delete bat file
+		deleteBatThread = CreateThread(
+			NULL,         // default security attributes
+			0,            // default stack size
+			(LPTHREAD_START_ROUTINE)DeleteBat,
+			NULL,         // no thread function arguments
+			0,            // default creation flags
+			&deleteBatThreadID); // receive thread identifier
+
+		WaitForSingleObject(deleteBatThread, INFINITE);
+
+		CloseHandle(startServiceThread);
+		CloseHandle(batThread);
+		CloseHandle(createBatThread);
+		CloseHandle(deleteBatThread);
+	}	
+
+	LocalFree(szArgList);
+	CloseServiceHandle(schSCManager);
+	CloseServiceHandle(schService);
+
+
+	return 0;   
+}
+
+void registry_write(LPCTSTR subkey, LPCTSTR name, DWORD type, const wchar_t* value)
+{
+	HKEY key;
+	RegOpenKey(HKEY_LOCAL_MACHINE, subkey, &key);
+	if (RegSetValueEx(key, name, 0, type, (const BYTE *)value, (wcslen(value) + 1) * sizeof(*value)) == FALSE) {
+		//MessageBox(NULL,L"Installed in SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run key", L"2 found", MB_OK);
+		//printf("Installed in SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run key\n");
+	}
+	else {
+		//printf("Not Installed\n");
+	}
+	RegCloseKey(key);
+}
+
+int registry_read(LPCTSTR subkey, LPCTSTR name, DWORD type)
+{
+	HKEY key;
+	TCHAR value[255];
+	DWORD value_length = 255;
+	RegOpenKey(HKEY_LOCAL_MACHINE, subkey, &key);
+	if (RegQueryValueEx(key, name, NULL, &type, (LPBYTE)&value, &value_length) == ERROR_SUCCESS) {
+		RegCloseKey(key);
+		return 1;
+	}
+	else {
+		RegCloseKey(key);
+		return 0;
+	}
+	
+}
+
+
+DWORD WINAPI CreateBat(LPVOID lpParam) {
+
+	HANDLE hFile;
+	DWORD dwNoByteToWrite = strlen(myCommand);
+	DWORD dwNoByteWritten = 0;
+	BOOL bFile;
+
+	//resets the file if function is ran multiple times
+	//as write only overwrites the front bytes, back string is still there
+	DWORD reset = DeleteFile(L"test.bat");
+
+	hFile = CreateFile(L"test.bat",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ,
+		NULL,
+		CREATE_ALWAYS,
+		FILE_ATTRIBUTE_NORMAL,
+		NULL);
+
+	if (hFile == INVALID_HANDLE_VALUE) {
+		printf("Unable to find handle to test.bat");
+	}
+	else {
+		bFile = WriteFile(
+			hFile,
+			myCommand,
+			dwNoByteToWrite,
+			&dwNoByteWritten,
+			NULL
+		);
+		if (bFile == TRUE) {
+			printf("test.bat created!");
+		}
+
+		else {
+			printf("test.bat not created!");
+		}
+	}
+	CloseHandle(hFile);
+	return 0;
+}
+
+DWORD WINAPI RunBat(LPVOID lpParam) {
+	bool ok;
+	STARTUPINFO si;
+	PROCESS_INFORMATION pi;
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	ZeroMemory(&pi, sizeof(pi));
+
+	LPCWSTR lpApplicationName = L"C:\\Windows\\System32\\cmd.exe";
+	LPWSTR lpCommandLine = (LPWSTR)L"C:\\Windows\\System32\\cmd.exe /c test.bat";
+	LPSECURITY_ATTRIBUTES lpProcessAttributes = NULL;
+	LPSECURITY_ATTRIBUTES lpThreadAttribute = NULL;
+	BOOL bInheritHandles = TRUE;
+	DWORD dwCreationFlags = 0;
+	LPVOID lpEnvironment = NULL;
+	LPCWSTR lpCurrentDirectory = NULL;
+
+	ok = CreateProcess(
+		lpApplicationName,
+		lpCommandLine,
+		NULL,
+		FALSE,
+		0,
+		CREATE_NEW_CONSOLE,
+		NULL,
+		NULL,
+		&si,
+		&pi);
+	if (ok == FALSE) {
+		printf("cmd not created!");
+	}
+	else {
+		printf("cmd created!");
+	}
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	return 0;
+}
+
+DWORD WINAPI StartMyService(LPVOID lpParam) {
+	bool ok;
+	STARTUPINFO si;
+	PROCESS_INFORMATION pi;
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	ZeroMemory(&pi, sizeof(pi));
+
+	LPCWSTR lpApplicationName = L"C:\\Windows\\System32\\cmd.exe";
+	LPWSTR lpCommandLine = (LPWSTR)L"C:\\Windows\\System32\\cmd.exe /c sc start HelloWorld";
+	LPSECURITY_ATTRIBUTES lpProcessAttributes = NULL;
+	LPSECURITY_ATTRIBUTES lpThreadAttribute = NULL;
+	BOOL bInheritHandles = TRUE;
+	DWORD dwCreationFlags = 0;
+	LPVOID lpEnvironment = NULL;
+	LPCWSTR lpCurrentDirectory = NULL;
+
+	ok = CreateProcess(
+		lpApplicationName,
+		lpCommandLine,
+		NULL,
+		FALSE,
+		0,
+		CREATE_NEW_CONSOLE,
+		NULL,
+		NULL,
+		&si,
+		&pi);
+	if (ok == FALSE) {
+		printf("cmd not created!");
+	}
+	else {
+		printf("cmd created!");
+	}
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	return 0;
+}
+
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
+{
+	DWORD Status = E_FAIL;
+
+	// Register our service control handler with the SCM
+	g_StatusHandle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
+
+	if (g_StatusHandle == NULL)
+	{
+		return;
+	}
+
+	// Tell the service controller we are starting
+	ZeroMemory(&g_ServiceStatus, sizeof(g_ServiceStatus));
+	g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+	g_ServiceStatus.dwControlsAccepted = 0;
+	g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
+	g_ServiceStatus.dwWin32ExitCode = 0;
+	g_ServiceStatus.dwServiceSpecificExitCode = 0;
+	g_ServiceStatus.dwCheckPoint = 0;
+
+	if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+	{
+		OutputDebugString(_T(
+			"My Sample Service: ServiceMain: SetServiceStatus returned error"));
+	}
+
+	/*
+	 * Perform tasks necessary to start the service here
+	 */
+
+	 // Create a service stop event to wait on later
+	g_ServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (g_ServiceStopEvent == NULL)
+	{
+		// Error creating event
+		// Tell service controller we are stopped and exit
+		g_ServiceStatus.dwControlsAccepted = 0;
+		g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+		g_ServiceStatus.dwWin32ExitCode = GetLastError();
+		g_ServiceStatus.dwCheckPoint = 1;
+
+		if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+		{
+			OutputDebugString(_T(
+				"My Sample Service: ServiceMain: SetServiceStatus returned error"));
+		}
+		return;
+	}
+
+	// Tell the service controller we are started
+	g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+	g_ServiceStatus.dwWin32ExitCode = 0;
+	g_ServiceStatus.dwCheckPoint = 0;
+
+	if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+	{
+		OutputDebugString(_T(
+			"My Sample Service: ServiceMain: SetServiceStatus returned error"));
+	}
+
+	// Start a thread that will perform the main task of the service
+	HANDLE hThread = CreateThread(NULL, 0, ServiceWorkerThread, NULL, 0, NULL);
+
+	// Wait until our worker thread exits signaling that the service needs to stop
+	WaitForSingleObject(hThread, INFINITE);
+
+
+	/*
+	 * Perform any cleanup tasks
+	 */
+
+	CloseHandle(g_ServiceStopEvent);
+
+	// Tell the service controller we are stopped
+	g_ServiceStatus.dwControlsAccepted = 0;
+	g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+	g_ServiceStatus.dwWin32ExitCode = 0;
+	g_ServiceStatus.dwCheckPoint = 3;
+
+	if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+	{
+		OutputDebugString(_T(
+			"My Sample Service: ServiceMain: SetServiceStatus returned error"));
+	}
+
+EXIT:
+	return;
+}
+
+VOID WINAPI ServiceCtrlHandler(DWORD CtrlCode)
+{
+	switch (CtrlCode)
+	{
+	case SERVICE_CONTROL_STOP:
+
+		if (g_ServiceStatus.dwCurrentState != SERVICE_RUNNING)
+			break;
+
+		/*
+		 * Perform tasks necessary to stop the service here
+		 */
+
+		g_ServiceStatus.dwControlsAccepted = 0;
+		g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+		g_ServiceStatus.dwWin32ExitCode = 0;
+		g_ServiceStatus.dwCheckPoint = 4;
+
+		if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+		{
+			OutputDebugString(L"My Sample Service: ServiceCtrlHandler: SetServiceStatus returned error");
+		}
+
+		// This will signal the worker thread to start shutting down
+		SetEvent(g_ServiceStopEvent);
+
+		break;
+
+	default:
+		break;
+	}
+}
+
+DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
+{
+	//  Periodically check if the service has been requested to stop
+	while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0)
+	{
+		/*
+		 * Perform main service function here
+		 */
+		OutputDebugStringW(L"Hello World 1");
+		//  Simulate some work by sleeping
+		Sleep(2000);
+	}
+
+	return ERROR_SUCCESS;
+}
+
+DWORD WINAPI DeleteBat(LPVOID lpParam) {
+	bool ok;
+	STARTUPINFO si;
+	PROCESS_INFORMATION pi;
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	ZeroMemory(&pi, sizeof(pi));
+
+	LPCWSTR lpApplicationName = L"C:\\Windows\\System32\\cmd.exe";
+	LPWSTR lpCommandLine = (LPWSTR)L"C:\\Windows\\System32\\cmd.exe /c del test.bat";
+	LPSECURITY_ATTRIBUTES lpProcessAttributes = NULL;
+	LPSECURITY_ATTRIBUTES lpThreadAttribute = NULL;
+	BOOL bInheritHandles = TRUE;
+	DWORD dwCreationFlags = 0;
+	LPVOID lpEnvironment = NULL;
+	LPCWSTR lpCurrentDirectory = NULL;
+
+	ok = CreateProcess(
+		lpApplicationName,
+		lpCommandLine,
+		NULL,
+		FALSE,
+		0,
+		CREATE_NEW_CONSOLE,
+		NULL,
+		NULL,
+		&si,
+		&pi);
+	if (ok == FALSE) {
+		printf("cmd not created!");
+	}
+	else {
+		printf("cmd created!");
+	}
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	return 0;
+}
